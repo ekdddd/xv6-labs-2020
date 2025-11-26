@@ -80,3 +80,15 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+void freebytes(uint64* dst){
+  *dst = 0;
+  // 空闲链表机制，空闲页作为节点指向下一个空闲页，只需要顺序遍历统计就行
+  struct run* p = kmem.freelist;
+  acquire(&kmem.lock);
+  while(p){
+    *dst += PGSIZE;
+    p = p->next;
+  }
+  release(&kmem.lock);
+}

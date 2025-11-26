@@ -126,6 +126,7 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  p->kama_syscall_trace = 0; // 初始化系统调用追踪掩码为0
 
   return p;
 }
@@ -294,6 +295,8 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+
+  np->kama_syscall_trace = p->kama_syscall_trace; // 继承父进程的系统调用追踪掩码
 
   release(&np->lock);
 
@@ -691,5 +694,17 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+void
+procnum(uint64* dst){
+  *dst = 0;
+  struct proc *p;
+  // 最后一个进程的地址 &proc[NPROC]，proc 是进程表的起始地址
+  for(p = proc; p < &proc[NPROC]; p++){
+    if(p->state != UNUSED){
+      (*dst)++;
+    } 
   }
 }
