@@ -122,18 +122,25 @@ recover_from_log(void)
 }
 
 // called at the start of each FS system call.
+// 目的：确保当前操作有足够的日志空间，并协调并发的文件系统调用
+// 结果：调用者现在可以安全地执行文件系统修改操作（如 write, create 等），并在完成后调用 end_op。
 void
 begin_op(void)
 {
   acquire(&log.lock);
-  while(1){
-    if(log.committing){
-      sleep(&log, &log.lock);
+  while(1){ // 如果当前无法开始操作（例如正在提交或空间不足），进程需要睡眠等待
+    if(log.committing){ // 当前日志系统正在将内存中的日志写入磁盘
+      sleep(&log, &log.lock); // 调用 sleep 进入睡眠状态，释放 log.lock，等待 commit 完成后的唤醒信号
+      // 检查日志空间是否充足
+      // - log.lh.n：当前日志中已经占用的块数（已修改但未提交的块）。
+      // - log.outstanding：当前正在进行的（未完成的）文件系统操作数量。
+      // - MAXOPBLOCKS：一个文件系统操作可能修改的最大块数（保守估计）。
+      // - LOGSIZE：日志区的总大小（磁盘上的日志块数）。
     } else if(log.lh.n + (log.outstanding+1)*MAXOPBLOCKS > LOGSIZE){
       // this op might exhaust log space; wait for commit.
       sleep(&log, &log.lock);
     } else {
-      log.outstanding += 1;
+      log.outstanding += 1; // 增加正在进行的文件系统操作计数
       release(&log.lock);
       break;
     }

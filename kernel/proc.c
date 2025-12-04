@@ -34,12 +34,14 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // // 为每个进程分配一个内核栈
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // // 将每个栈映射到KSTACK生成的虚拟地址
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
   }
   kvminithart();
 }
@@ -89,6 +91,7 @@ allocpid() {
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
+// 负责为新进程准备好运行所需的内核资源
 static struct proc*
 allocproc(void)
 {
@@ -121,6 +124,18 @@ found:
     return 0;
   }
 
+  // 创建独立的内核页表，将内核所需映射添加至新页表
+  p->kernel_pagetable = kvminit_newpgtbl();
+
+  // 分配一个物理页作为新进程的内核栈使用
+  char *pa = kalloc();
+  if(pa == 0){
+    panic("kallo");
+  }
+  uint64 va = KSTACK((int)0); // 将内核栈映射到固定的虚拟地址
+  kvmmap(p->kernel_pagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va; //记录内核栈的虚拟地址
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -149,11 +164,23 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+
+  // 释放进程内核栈（独享的物理页被释放）
+  void* kstack_pa = (void*)kvmpa(p->kernel_pagetable, p->kstack);
+  kfree(kstack_pa);
+  p->kstack = 0;
+  // 释放进程独立的内核页表（保留共享的物理页）
+  // 如果使用PROC_FREEPAGETABLE释放页表会把物理页表也一起释放导致内核运行需要的关键物理页也被释放（其他进程共用的物理页表被释放）
+  // kvm_free_kernelpgtbl递归释放进程独享的页表，释放页表不释放物理页表
+  kvm_free_kernelpgtbl(p->kernel_pagetable);
+  p->kernel_pagetable = 0;
+
   p->state = UNUSED;
 }
 
 // Create a user page table for a given process,
 // with no user memory, but with trampoline pages.
+// 创建一个新的用户页表，并且只初始化了 trampoline 和 trapframe 这两个特殊的映射
 pagetable_t
 proc_pagetable(struct proc *p)
 {
@@ -221,6 +248,8 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  // 同步程序内存映射至内核页表
+  kvmcopymappings(p->pagetable, p->kernel_pagetable, 0, p->sz);
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -239,15 +268,23 @@ int
 growproc(int n)
 {
   uint sz;
-  struct proc *p = myproc();
-
+  struct proc *p = myproc(); 
+  // 进程内存大小 Size of process memory (bytes)
   sz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+    uint64 newsz;
+    if((newsz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+
+    if(kvmcopymappings(p->pagetable, p->kernel_pagetable, sz, n) != 0){
+      uvmdealloc(p->pagetable, newsz, sz);
+      return -1;
+    }
+    sz = newsz;
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    uvmdealloc(p->pagetable, sz, sz + n);
+    sz = kvmdealloc(p->kernel_pagetable, sz, sz + n);
   }
   p->sz = sz;
   return 0;
@@ -268,7 +305,8 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  // 加入kvmcopymappings将新进程用户页表映射拷贝至新进程内核页表中
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0 || kvmcopymappings(np->pagetable, np->kernel_pagetable, 0, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
@@ -473,7 +511,16 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 切换到进程独立的内核页表，把 p->kernel_pagetable写入寄存器 satp
+        w_satp(MAKE_SATP(p->kernel_pagetable));
+        // 清除快表缓存，刷新TLB缓存，避免使用旧页表留下的缓存条
+        sfence_vma();
+        // 调度、执行进程，切换上下文
+        // 当进程 P 运行完时间片，主动调用 swtch 切换回来时，scheduler 中的那个 swtch 调用才会最终返回
         swtch(&c->context, &p->context);
+        // 运行结束后，切换回全局内核页表
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.

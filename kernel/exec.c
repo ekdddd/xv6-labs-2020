@@ -21,26 +21,26 @@ exec(char *path, char **argv)
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
 
-  begin_op();
+  begin_op(); // 开始执行文件系统修改操作
 
-  if((ip = namei(path)) == 0){
+  if((ip = namei(path)) == 0){ // 获取可执行文件path对应的inode
     end_op();
     return -1;
   }
   ilock(ip);
 
-  // Check ELF header
+  // Check ELF header （ELF 头是可执行文件的元数据）
   if(readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))
     goto bad;
   if(elf.magic != ELF_MAGIC)
     goto bad;
 
-  if((pagetable = proc_pagetable(p)) == 0)
+  if((pagetable = proc_pagetable(p)) == 0) // 创建一个新的用户页表，构建新程序的独立地址空间
     goto bad;
 
   // Load program into memory.
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
-    if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
+    if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph)) // 从 ELF 文件中读取一个程序头结构体
       goto bad;
     if(ph.type != ELF_PROG_LOAD)
       continue;
@@ -49,12 +49,14 @@ exec(char *path, char **argv)
     if(ph.vaddr + ph.memsz < ph.vaddr)
       goto bad;
     uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
+    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0) // 分配物理页 建立映射
+      goto bad;
+    if(sz1 >= PLIC)
       goto bad;
     sz = sz1;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
+    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0) // 将文件中的数据（代码或初始化数据）读取到刚才分配好的物理内存中
       goto bad;
   }
   iunlockput(ip);
@@ -71,11 +73,11 @@ exec(char *path, char **argv)
   if((sz1 = uvmalloc(pagetable, sz, sz + 2*PGSIZE)) == 0)
     goto bad;
   sz = sz1;
-  uvmclear(pagetable, sz-2*PGSIZE);
+  uvmclear(pagetable, sz-2*PGSIZE); // 设置栈的保护页 禁止用户访问
   sp = sz;
   stackbase = sp - PGSIZE;
 
-  // Push argument strings, prepare rest of stack in ustack.
+  // Push argument strings, prepare rest of stack in ustack. 把参数字符串从内核搬到用户栈上，并记录下它们在用户栈上的新地址
   for(argc = 0; argv[argc]; argc++) {
     if(argc >= MAXARG)
       goto bad;
@@ -87,7 +89,7 @@ exec(char *path, char **argv)
       goto bad;
     ustack[argc] = sp;
   }
-  ustack[argc] = 0;
+  ustack[argc] = 0; // 记录参数地址
 
   // push the array of argv[] pointers.
   sp -= (argc+1) * sizeof(uint64);
@@ -100,21 +102,32 @@ exec(char *path, char **argv)
   // arguments to user main(argc, argv)
   // argc is returned via the system call return
   // value, which goes in a0.
+  // 将指向参数指针数组（即 argv 数组）的地址放入寄存器 a1，而参数个数 argc 最终会放入寄存器 a0
   p->trapframe->a1 = sp;
 
   // Save program name for debugging.
+  // 如果 path 是 "/home/user/ls"，循环结束后 last 将指向 "ls"
   for(last=s=path; *s; s++)
     if(*s == '/')
       last = s+1;
   safestrcpy(p->name, last, sizeof(p->name));
+
+  // 清除内核页表中对程序内存的旧映射，重新建立映射
+  uvmunmap(p->kernel_pagetable,0,PGROUNDUP(oldsz)/PGSIZE,0); 
+  kvmcopymappings(pagetable,p->kernel_pagetable,0,sz);
     
-  // Commit to the user image.
+  // Commit to the user image. 更新进程信息
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
+  // 释放旧资源
   proc_freepagetable(oldpagetable, oldsz);
+
+  // 当且仅当第一个进程（init）启动并执行exec时，打印出它的页表结构
+  if(p->pid == 1)
+    vmprint(p->pagetable);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 

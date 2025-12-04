@@ -84,6 +84,8 @@ holding(struct spinlock *lk)
 // push_off/pop_off are like intr_off()/intr_on() except that they are matched:
 // it takes two pop_off()s to undo two push_off()s.  Also, if interrupts
 // are initially off, then push_off, pop_off leaves them off.
+// 提供“嵌套计数”的方式关闭中断。
+// 只有最外层的 pop_off() 才会真正打开中断。
 
 void
 push_off(void)

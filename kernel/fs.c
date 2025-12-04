@@ -239,6 +239,7 @@ iupdate(struct inode *ip)
 // Find the inode with number inum on device dev
 // and return the in-memory copy. Does not lock
 // the inode and does not read it from disk.
+// 获取指定设备上指定编号的 inode 的内存副本。如果该 inode 已经在内存缓存（icache）中，则直接返回并增加引用计数；如果不在，则分配一个空闲的缓存项并初始化它（但不从磁盘读取内容）。
 static struct inode*
 iget(uint dev, uint inum)
 {
@@ -248,25 +249,27 @@ iget(uint dev, uint inum)
 
   // Is the inode already cached?
   empty = 0;
-  for(ip = &icache.inode[0]; ip < &icache.inode[NINODE]; ip++){
-    if(ip->ref > 0 && ip->dev == dev && ip->inum == inum){
-      ip->ref++;
+  for(ip = &icache.inode[0]; ip < &icache.inode[NINODE]; ip++){ // 遍历整个 inode 缓存数组
+    if(ip->ref > 0 && ip->dev == dev && ip->inum == inum){ // 该缓存项正在被使用 且 设备号和 inode 编号匹配
+      ip->ref++; // 增加引用计数，表示多了一个使用者
       release(&icache.lock);
       return ip;
     }
-    if(empty == 0 && ip->ref == 0)    // Remember empty slot.
-      empty = ip;
+    if(empty == 0 && ip->ref == 0)    // Remember empty slot. 当前项未被使用（ip->ref == 0）且之前没找到过空闲项（empty == 0）
+      empty = ip; // 记录该空闲项，供后续分配使用
   }
 
   // Recycle an inode cache entry.
+  // 没有空闲项 (empty == 0)：说明数组里所有位置都在被使用（ref > 0），系统过载了
   if(empty == 0)
     panic("iget: no inodes");
 
+  // 未命中缓存，使用找到的空闲缓存项进行初始化
   ip = empty;
   ip->dev = dev;
   ip->inum = inum;
   ip->ref = 1;
-  ip->valid = 0;
+  ip->valid = 0; // 标记数据尚未从磁盘读取
   release(&icache.lock);
 
   return ip;
@@ -283,8 +286,8 @@ idup(struct inode *ip)
   return ip;
 }
 
-// Lock the given inode.
-// Reads the inode from disk if necessary.
+// Lock the given inode. 锁定给定的 inode
+// Reads the inode from disk if necessary. 确保其内容已从磁盘读取到内存中。
 void
 ilock(struct inode *ip)
 {
@@ -294,10 +297,12 @@ ilock(struct inode *ip)
   if(ip == 0 || ip->ref < 1)
     panic("ilock");
 
-  acquiresleep(&ip->lock);
+  acquiresleep(&ip->lock); // 获取 inode 的睡眠锁，确保对该 inode 的独占访问。如果锁已被其他进程持有，当前进程会睡眠等待，直到锁被释放
 
   if(ip->valid == 0){
+    // 读取磁盘 IBLOCK(ip->inum, sb) 宏根据 inode 编号计算该 inode 存储在磁盘上的哪个块中。
     bp = bread(ip->dev, IBLOCK(ip->inum, sb));
+    // dip 指向缓冲区中对应的磁盘 inode 结构，ip->inum % IPB 计算该 inode 在块内的索引
     dip = (struct dinode*)bp->data + ip->inum%IPB;
     ip->type = dip->type;
     ip->major = dip->major;
@@ -305,7 +310,7 @@ ilock(struct inode *ip)
     ip->nlink = dip->nlink;
     ip->size = dip->size;
     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
-    brelse(bp);
+    brelse(bp); // 释放缓冲区
     ip->valid = 1;
     if(ip->type == 0)
       panic("ilock: no type");
@@ -334,7 +339,7 @@ iput(struct inode *ip)
 {
   acquire(&icache.lock);
 
-  if(ip->ref == 1 && ip->valid && ip->nlink == 0){
+  if(ip->ref == 1 && ip->valid && ip->nlink == 0){ // 最后一个引用，其中nlink为链接数，为0时表示文件被删除
     // inode has no links and no other references: truncate and free.
 
     // ip->ref == 1 means no other process can have ip locked,
@@ -343,9 +348,9 @@ iput(struct inode *ip)
 
     release(&icache.lock);
 
-    itrunc(ip);
+    itrunc(ip); // 截断文件内容（释放数据块），将文件内容占用的磁盘块标记为空闲
     ip->type = 0;
-    iupdate(ip);
+    iupdate(ip); // 将修改后的inode（被删除的状态）写回磁盘
     ip->valid = 0;
 
     releasesleep(&ip->lock);
@@ -361,7 +366,7 @@ iput(struct inode *ip)
 void
 iunlockput(struct inode *ip)
 {
-  iunlock(ip);
+  iunlock(ip); // 先解锁 inode
   iput(ip);
 }
 
@@ -448,10 +453,10 @@ stati(struct inode *ip, struct stat *st)
   st->size = ip->size;
 }
 
-// Read data from inode.
+// Read data from inode. 从 inode 代表的文件中读取数据
 // Caller must hold ip->lock.
-// If user_dst==1, then dst is a user virtual address;
-// otherwise, dst is a kernel address.
+// If user_dst==1, then dst is a user virtual address;user_dst为1表示dst为用户虚拟地址
+// otherwise, dst is a kernel address. user_dst为0表示dst为内核地址（dst为目标内存地址、off偏移量、n为读的字节数）
 int
 readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 {
@@ -460,7 +465,7 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 
   if(off > ip->size || off + n < off)
     return 0;
-  if(off + n > ip->size)
+  if(off + n > ip->size)// 读取范围超过文件大小，调整读取长度
     n = ip->size - off;
 
   for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
@@ -523,6 +528,7 @@ namecmp(const char *s, const char *t)
 
 // Look for a directory entry in a directory.
 // If found, set *poff to byte offset of entry.
+// 在指定的目录中查找具有特定名称的文件（或子目录），并返回其 inode 结构体指针。如果找到了该目录项，还会将其在目录文件中的偏移量存储在 poff 指向的位置。
 struct inode*
 dirlookup(struct inode *dp, char *name, uint *poff)
 {
@@ -592,7 +598,7 @@ dirlink(struct inode *dp, char *name, uint inum)
 //   skipelem("///a//bb", name) = "bb", setting name = "a"
 //   skipelem("a", name) = "", setting name = "a"
 //   skipelem("", name) = skipelem("////", name) = 0
-//
+// 从路径字符串中提取出“当前这一级”的文件名或目录名，并返回指向“下一级”路径开始位置的指针。
 static char*
 skipelem(char *path, char *name)
 {
@@ -622,35 +628,36 @@ skipelem(char *path, char *name)
 // If parent != 0, return the inode for the parent and copy the final
 // path element into name, which must have room for DIRSIZ bytes.
 // Must be called inside a transaction since it calls iput().
+// nameiparent标识是查找父目录（1）还是目标文件本身（0）
 static struct inode*
 namex(char *path, int nameiparent, char *name)
 {
   struct inode *ip, *next;
-
-  if(*path == '/')
-    ip = iget(ROOTDEV, ROOTINO);
-  else
+  // 输入绝对路径时 解析器必须从文件系统的“根”开始查找
+  if(*path == '/') // 获取指向根目录（"/"）的内存inode 结构体指针
+    ip = iget(ROOTDEV, ROOTINO); // ROOTDEV根文件系统所在的磁盘设备号 和 ROOTINO根目录的inode编号
+  else // 输入相对路径时 解析器从当前工作目录开始查找
     ip = idup(myproc()->cwd);
 
-  while((path = skipelem(path, name)) != 0){
-    ilock(ip);
-    if(ip->type != T_DIR){
+  while((path = skipelem(path, name)) != 0){ // path指向下一级开始的路径，name保存当前文件名或目录名（每次循环都获取一级目录名）
+    ilock(ip); // 锁定当前目录的 inode，确保对其内容的独占访问，并且确保内容已经从磁盘读取到内存
+    if(ip->type != T_DIR){ // 非目录 -> 解析失败
       iunlockput(ip);
       return 0;
     }
     if(nameiparent && *path == '\0'){
-      // Stop one level early.
-      iunlock(ip);
-      return ip;
+      // Stop one level early. ip 查找目标文件的父目录
+      iunlock(ip); 
+      return ip; //返回父目录inode
     }
-    if((next = dirlookup(ip, name, 0)) == 0){
+    if((next = dirlookup(ip, name, 0)) == 0){ // 调用 dirlookup 在当前目录 ip 中查找名字为 name 的子项
       iunlockput(ip);
       return 0;
     }
-    iunlockput(ip);
+    iunlockput(ip); // 释放当前目录 ip 的锁和引用
     ip = next;
   }
-  if(nameiparent){
+  if(nameiparent){ // 父目录查找失败
     iput(ip);
     return 0;
   }
