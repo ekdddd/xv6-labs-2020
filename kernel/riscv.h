@@ -40,10 +40,10 @@ w_mepc(uint64 x)
 
 // Supervisor Status Register, sstatus
 
-#define SSTATUS_SPP (1L << 8)  // Previous mode, 1=Supervisor, 0=User
+#define SSTATUS_SPP (1L << 8)  // Previous mode, 1=Supervisor, 0=User 指示陷阱是来自用户模式还是管理模式，并控制sret返回的模式
 #define SSTATUS_SPIE (1L << 5) // Supervisor Previous Interrupt Enable
 #define SSTATUS_UPIE (1L << 4) // User Previous Interrupt Enable
-#define SSTATUS_SIE (1L << 1)  // Supervisor Interrupt Enable
+#define SSTATUS_SIE (1L << 1)  // Supervisor Interrupt Enable 控制设备中断是否启用（如果内核清空SIE，RISC-V将推迟设备中断，直到内核重新设置）
 #define SSTATUS_UIE (1L << 0)  // User Interrupt Enable
 
 static inline uint64
@@ -114,6 +114,9 @@ w_mie(uint64 x)
 // machine exception program counter, holds the
 // instruction address to which a return from
 // exception will go.
+// 发生陷阱时保存用户程序计数器 pc
+// 因为 PC（程序计数器）会被 stvec 的值覆盖，来让 CPU 跳转去执行“处理陷阱的代码”
+// 返回时跳转到该地址继续执行
 static inline void 
 w_sepc(uint64 x)
 {
@@ -160,6 +163,8 @@ w_mideleg(uint64 x)
 
 // Supervisor Trap-Vector Base Address
 // low two bits are mode.
+// 陷阱处理程序的地址
+// 蹦床内容在trampoline.S中设置，并且（当执行用户代码时）stvec设置为uservec (kernel/trampoline.S:16)
 static inline void 
 w_stvec(uint64 x)
 {
@@ -203,6 +208,7 @@ r_satp()
 }
 
 // Supervisor Scratch register, for early trap handler in trampoline.S.
+// 用来保存 Trapframe 的地址，后续会将上下文存放至 Trapframe
 static inline void 
 w_sscratch(uint64 x)
 {
@@ -216,6 +222,7 @@ w_mscratch(uint64 x)
 }
 
 // Supervisor Trap Cause
+// 描述陷阱原因的数字
 static inline uint64
 r_scause()
 {
@@ -319,6 +326,14 @@ sfence_vma()
   asm volatile("sfence.vma zero, zero");
 }
 
+// 获取当前函数的fp（frame pointer）
+static inline uint64
+r_fp()
+{
+  uint64 x;
+  asm volatile("mv %0, s0" : "=r" (x));
+  return x;
+}
 
 #define PGSIZE 4096 // bytes per page
 #define PGSHIFT 12  // bits of offset within a page
