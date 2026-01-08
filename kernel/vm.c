@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -180,10 +182,12 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     panic("uvmunmap: not aligned");
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+    if((pte = walk(pagetable, a, 0)) == 0) 
+      // panic("uvmunmap: walk"); // 惰性分配中因为没有实际分配物理页面，所以解除映射关系时遇到不存在的映射直接跳过 
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      // panic("uvmunmap: not mapped"); // 不存在的映射直接跳过
+      continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -315,9 +319,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      // panic("uvmcopy: pte should exist"); // 惰性分配中因为没有实际分配物理页面，所以复制时遇到不存在的映射直接跳过 
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      // panic("uvmcopy: page not present");
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -355,6 +361,9 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  if(uvmshouldallocate(dstva)){
+    uvmlazyallocate(dstva);
+  }
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
@@ -364,7 +373,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
-    memmove((void *)(pa0 + (dstva - va0)), src, n);
+    memmove((void *)(pa0 + (dstva - va0)), src, n); // 目标地址，源地址，字节数
 
     len -= n;
     src += n;
@@ -380,6 +389,9 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
+  if(uvmshouldallocate(srcva)){
+    uvmlazyallocate(srcva);
+  }
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
@@ -438,5 +450,30 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+// 判断页面是否是之前惰性分配的地址，是返回1
+int uvmshouldallocate(uint64 va){
+  pte_t *pte;
+  struct proc *p = myproc();
+  return va < p->sz && PGROUNDDOWN(va) != r_sp()  // 地址在进程内存大小范围内且不在 guard page （用于检查是否访问超出栈的范围的保护页，本身无效）
+          && (((pte=walk(p->pagetable,va,0))==0) || ((*pte & PTE_V) == 0)); // 页表项不存在或无效
+}
+
+void uvmlazyallocate(uint64 va){
+  struct proc *p = myproc();
+  char* pa = kalloc(); // 分配物理页，返回起始地址
+  if(pa==0){
+    printf("lazy alloc:out of memory\n");
+    p->killed = 1;
+  }
+  else{
+    memset(pa,0,PGSIZE); // 初始化为0
+    if(mappages(p->pagetable,PGROUNDDOWN(va),PGSIZE,(uint64)pa,PTE_R | PTE_W | PTE_X | PTE_U)!=0){ // 映射物理地址
+      printf("lazy alloc:failed to map page\n");
+      kfree(pa);
+      p->killed = 1;
+    }
   }
 }

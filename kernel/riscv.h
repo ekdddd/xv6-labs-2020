@@ -279,6 +279,7 @@ intr_get()
   return (x & SSTATUS_SIE) != 0;
 }
 
+// 返回当前栈指针（Stack Pointer）寄存器的值，指向栈顶（栈向下增长）
 static inline uint64
 r_sp()
 {
