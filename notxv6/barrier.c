@@ -30,7 +30,16 @@ barrier()
   // Block until all threads have called barrier() and
   // then increment bstate.round.
   //
-  
+  pthread_mutex_lock(&bstate.barrier_mutex);
+  if(++bstate.nthread < nthread)
+  // 阻塞等待知道所有线程都到达屏障
+    pthread_cond_wait(&bstate.barrier_cond,&bstate.barrier_mutex);
+  else{
+    bstate.nthread = 0;
+    bstate.round++;
+    pthread_cond_broadcast(&bstate.barrier_cond);
+  }
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
@@ -72,6 +81,7 @@ main(int argc, char *argv[])
     assert(pthread_create(&tha[i], NULL, thread, (void *) i) == 0);
   }
   for(i = 0; i < nthread; i++) {
+    // 主线程阻塞等待，直到所有子线程结束
     assert(pthread_join(tha[i], &value) == 0);
   }
   printf("OK; passed\n");

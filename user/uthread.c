@@ -10,25 +10,44 @@
 #define STACK_SIZE  8192
 #define MAX_THREAD  4
 
+struct context{
+  uint64 ra;
+  uint64 sp;
+  // callee-saved registers
+  uint64 s0;
+  uint64 s1;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
+};
 
 struct thread {
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
-
+  struct context context;       /* thread context for switching 保存上下文*/
 };
+
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
-extern void thread_switch(uint64, uint64);
+// extern void thread_switch(uint64, uint64);
+extern void thread_switch(struct context* old,struct context* new);
               
 void 
 thread_init(void)
 {
-  // main() is thread 0, which will make the first invocation to
+  // main() is thread 0, which will make the first invocation调用 to
   // thread_schedule().  it needs a stack so that the first thread_switch() can
   // save thread 0's state.  thread_schedule() won't run the main thread ever
   // again, because its state is set to RUNNING, and thread_schedule() selects
   // a RUNNABLE thread.
-  current_thread = &all_thread[0];
+  current_thread = &all_thread[0];  // 指向第一个线程（保存main()）
   current_thread->state = RUNNING;
 }
 
@@ -39,18 +58,18 @@ thread_schedule(void)
 
   /* Find another runnable thread. */
   next_thread = 0;
-  t = current_thread + 1;
+  t = current_thread + 1; //指向当前线程下一个线程
   for(int i = 0; i < MAX_THREAD; i++){
-    if(t >= all_thread + MAX_THREAD)
+    if(t >= all_thread + MAX_THREAD) // 轮回遍历，超出线程数组范围则回到首位
       t = all_thread;
     if(t->state == RUNNABLE) {
-      next_thread = t;
+      next_thread = t; // 找到下一个可运行线程
       break;
     }
-    t = t + 1;
+    t = t + 1; // 指向下一个线程
   }
 
-  if (next_thread == 0) {
+  if (next_thread == 0) { // 所有线程都不可运行
     printf("thread_schedule: no runnable threads\n");
     exit(-1);
   }
@@ -59,6 +78,7 @@ thread_schedule(void)
     next_thread->state = RUNNING;
     t = current_thread;
     current_thread = next_thread;
+    thread_switch(&t->context, &next_thread->context);
     /* YOUR CODE HERE
      * Invoke thread_switch to switch from t to next_thread:
      * thread_switch(??, ??);
@@ -72,20 +92,24 @@ thread_create(void (*func)())
 {
   struct thread *t;
 
-  for (t = all_thread; t < all_thread + MAX_THREAD; t++) {
+  for (t = all_thread; t < all_thread + MAX_THREAD; t++) { // 找到空闲线程
     if (t->state == FREE) break;
   }
-  t->state = RUNNABLE;
+  t->state = RUNNABLE; //状态修改为可运行
   // YOUR CODE HERE
+  // 返回地址设置为func，栈指针设置为栈顶
+  t->context.ra = (uint64)func;
+  t->context.sp = (uint64)&t->stack + (STACK_SIZE-1);
 }
 
 void 
-thread_yield(void)
+thread_yield(void) // 让出cpu执行权
 {
   current_thread->state = RUNNABLE;
   thread_schedule();
 }
 
+// volatile 关键字告诉编译器：这个变量的值可能会随时发生变化，而且这种变化可能不是由当前代码逻辑直接引起的，确保每次都重新读取变量的值
 volatile int a_started, b_started, c_started;
 volatile int a_n, b_n, c_n;
 
@@ -95,18 +119,18 @@ thread_a(void)
   int i;
   printf("thread_a started\n");
   a_started = 1;
-  while(b_started == 0 || c_started == 0)
+  while(b_started == 0 || c_started == 0) //等b和c都启动后再继续
     thread_yield();
   
-  for (i = 0; i < 100; i++) {
+  for (i = 0; i < 100; i++) { // 打印100次自己的标识，用于测试
     printf("thread_a %d\n", i);
     a_n += 1;
     thread_yield();
   }
   printf("thread_a: exit after %d\n", a_n);
 
-  current_thread->state = FREE;
-  thread_schedule();
+  current_thread->state = FREE; // 线程结束，状态设为FREE
+  thread_schedule(); // 该任务结束后彻底交出cpu使用权调度下一个线程
 }
 
 void 
