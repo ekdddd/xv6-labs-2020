@@ -73,9 +73,9 @@ acquire(struct spinlock *lk)
   //   a5 = 1
   //   s1 = &lk->locked
   //   amoswap.w.aq a5, a5, (s1)
-  while(__sync_lock_test_and_set(&lk->locked, 1) != 0) {
+  while(__sync_lock_test_and_set(&lk->locked, 1) != 0) { // 循环直至获取锁，__sync_lock_test_and_set为原子操作每次将1和&lk->locked进行交换，返回旧值
 #ifdef LAB_LOCK
-    __sync_fetch_and_add(&(lk->nts), 1);
+    __sync_fetch_and_add(&(lk->nts), 1); // 自旋次数递增
 #else
    ;
 #endif
@@ -88,6 +88,7 @@ acquire(struct spinlock *lk)
   __sync_synchronize();
 
   // Record info about lock acquisition for holding() and debugging.
+  // 记录获取锁的cpu
   lk->cpu = mycpu();
 }
 
@@ -97,7 +98,7 @@ release(struct spinlock *lk)
 {
   if(!holding(lk))
     panic("release");
-
+  // 清除cpu字段，表示该锁不再被任何cpu持有
   lk->cpu = 0;
 
   // Tell the C compiler and the CPU to not move loads or stores
@@ -115,6 +116,7 @@ release(struct spinlock *lk)
   // On RISC-V, sync_lock_release turns into an atomic swap:
   //   s1 = &lk->locked
   //   amoswap.w zero, zero, (s1)
+  // 因为如果将0赋值给lk->locked，可能会被编译器优化成多条store指令，而__sync_lock_release是原子操作，能保证原子性
   __sync_lock_release(&lk->locked);
 
   pop_off();
