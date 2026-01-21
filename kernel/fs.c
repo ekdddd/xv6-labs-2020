@@ -380,18 +380,45 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
+  // 直接映射
   if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0)
+    if((addr = ip->addrs[bn]) == 0) // 位图中标识为0则说明还没有分配
       ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
   }
+  // 间接块号，减去直接块号部分获得相对间接块号
   bn -= NDIRECT;
 
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT]) == 0)
-      ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+    if((addr = ip->addrs[NDIRECT]) == 0) // 一级间接块还没有分配
+      ip->addrs[NDIRECT] = addr = balloc(ip->dev); // 映射256个块
+    // 获取刚分配的缓存块
     bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn]) == 0){ //检查bn对应块是否分配，赋值后的值和0作比较
+      a[bn] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp); //建立映射结束，释放缓存块
+    return addr;
+  }
+
+  // 二级间接块号，减去一级间接块号部分获得相对二级间接块号
+  bn -= NINDIRECT;
+  if(bn<NINDIRECT * NINDIRECT){
+    if((addr = ip->addrs[NDIRECT+1])==0) // 二级间接块还没有分配
+      ip->addrs[NDIRECT+1] = addr = balloc(ip->dev); // 映射256*256个块
+    bp = bread(ip->dev,addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn/NINDIRECT])==0){
+      a[bn / NINDIRECT] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    // 最后一级索引
+    bn %= NINDIRECT;
+    bp = bread(ip->dev,addr);
     a = (uint*)bp->data;
     if((addr = a[bn]) == 0){
       a[bn] = addr = balloc(ip->dev);
@@ -399,7 +426,7 @@ bmap(struct inode *ip, uint bn)
     }
     brelse(bp);
     return addr;
-  }
+    }
 
   panic("bmap: out of range");
 }
@@ -412,7 +439,8 @@ itrunc(struct inode *ip)
   int i, j;
   struct buf *bp;
   uint *a;
-
+  
+  // 释放直接块的映射
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
@@ -420,16 +448,38 @@ itrunc(struct inode *ip)
     }
   }
 
+  // 释放一级间接块的映射
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
+    for(j = 0; j < NINDIRECT; j++){ // 释放一级间接部分的块
       if(a[j])
         bfree(ip->dev, a[j]);
     }
     brelse(bp);
-    bfree(ip->dev, ip->addrs[NDIRECT]);
+    bfree(ip->dev, ip->addrs[NDIRECT]); // 释放索引块
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // 释放二级间接块的映射
+  if(ip->addrs[NDIRECT + 1]){
+    bp = bread(ip->dev,ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(int i = 0;i<NINDIRECT;++i){ // 一级索引块
+      if(a[i]){ // 找到标识为1，已被使用的块
+        struct buf* bp2 = bread(ip->dev,a[i]); 
+        uint* a2 = (uint*)bp2->data;
+        for(int j = 0;j <NINDIRECT;++j){ // 进入二级间接块
+          if(a2[j])
+            bfree(ip->dev,a2[j]);
+        }
+        brelse(bp2);
+        bfree(ip->dev,a[i]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev,ip->addrs[NDIRECT + 1]);
+    ip->addrs[NDIRECT + 1] = 0;
   }
 
   ip->size = 0;

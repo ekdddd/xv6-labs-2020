@@ -304,11 +304,31 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
+    int symlink_depth = 0;
+    while(1){
+      if((ip = namei(path)) == 0){ // 解析路径，获取对应inode
+        end_op();
+        return -1;
+      }
+      ilock(ip); // 锁定inode以便检查类型
+      if(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0){ // 检查是否可以跟随符号链接，遇到软链接时会自动解析其目标路径，如果当前指向还是软链接就继续循环，找到底层路径
+        if(++symlink_depth > 10){ // 链接深度超过10就退出
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+        if(readi(ip,0,(uint64)path,0,MAXPATH) < 0){ // 从软链接 inode 的数据区读取目标路径字符串
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+        iunlockput(ip);
+      }
+      else{
+        break;
+      }
     }
-    ilock(ip);
+    
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -482,5 +502,29 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void){
+  struct inode *ip;
+  char target[MAXPATH],path[MAXPATH];
+  // 从用户空间获取系统调用参数（字符串），并进行合法性检查。
+  if(argstr(0,target,MAXPATH) < 0 || argstr(1,path,MAXPATH) < 0)
+    return -1;
+
+  // 等待并确保本次操作有足够的日志空间；标记本次系统调用进入了一个受日志保护的临界区；让后续的文件系统写操作都被记录到日志中，直到 end_op()。
+  begin_op();
+  ip = create(path,T_SYMLINK,0,0); // 创建类型为T_SYMLINK软链接的inode，指向path路径。
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  if(writei(ip,0,(uint64)target,0,strlen(target))<0){ // 将target内容写入新创建的inode中。写入数据区
+    end_op();
+    return -1;
+  }
+  iunlockput(ip); // 解锁并减少inode引用计数（进程不再使用该inode）
+  end_op();
   return 0;
 }
