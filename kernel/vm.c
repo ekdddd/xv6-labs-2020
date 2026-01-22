@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "file.h"
 
 /*
  * the kernel's page table.
@@ -427,5 +432,36 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+void
+vmaunmap(pagetable_t pagetable,uint64 va,uint64 nbytes,struct vma* v){
+  uint64 a;
+  pte_t *pte;
+
+  for(a = va;a < va + nbytes;a+=PGSIZE){
+    if((pte = walk(pagetable, a, 0)) == 0) 
+      continue;
+    if(PTE_FLAGS(*pte) == PTE_V)
+      panic("sys_munmap: not a leaf");
+    if(*pte & PTE_V){
+      uint64 pa = PTE2PA(*pte);
+      if((*pte & PTE_D) && (v->flags & MAP_SHARED)){ // 脏页需要写回磁盘（映射时指定了 MAP_SHARED，进程对映射区域的写操作会同步回原文件）
+        begin_op();
+        ilock(v->f->ip);
+        uint64 aoff = a - v->vastart; // 相对于vma的偏移量
+        if(aoff < 0) // 第一页不满PGSIZE的一个页（从页中间开始）
+          writei(v->f->ip,0,pa + (-aoff),v->offset,PGSIZE+aoff);
+        else if(aoff + PGSIZE > v->sz) // 最后一页不满PGSIZE的一个页（从页中间结束）
+          writei(v->f->ip,0,pa,v->offset + aoff,v->sz - aoff);
+        else
+          writei(v->f->ip,0,pa,v->offset + aoff,PGSIZE);
+        iunlock(v->f->ip);
+        end_op();
+      }
+      kfree((void*)pa);
+      *pte = 0;
+    }
   }
 }

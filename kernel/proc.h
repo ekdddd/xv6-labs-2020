@@ -82,6 +82,20 @@ struct trapframe {
 
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+
+// 记录mmap创建的虚拟内存地址的范围、长度、权限、文件等信息
+struct vma{
+    int valid;          // 该虚拟内存是否已经被映射
+    uint64 vastart;    // 映射的虚拟内存起始地址
+    uint64 sz;        // 映射的虚拟内存长度
+    struct file* f;     // 映射的文件
+    int prot;       // 映射的权限
+    int flags;    // 标记映射内存的修改是否写回文件
+    uint64 offset;    // 映射文件的起点
+};
+
+#define NVMA 16
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -103,4 +117,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vma vmas[NVMA];       // mmap虚拟内存映射地址数组
 };
