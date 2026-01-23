@@ -17,7 +17,7 @@ static struct rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
 static struct mbuf *rx_mbufs[RX_RING_SIZE];
 
 // remember where the e1000's registers live.
-static volatile uint32 *regs;
+static volatile uint32 *regs; 
 
 struct spinlock e1000_lock;
 
@@ -92,6 +92,8 @@ e1000_init(uint32 *xregs)
   regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
 }
 
+// 将以太网帧传输到网络接口卡
+// 将以太网帧填入发送描述符环中，并更新发送描述符环的指针
 int
 e1000_transmit(struct mbuf *m)
 {
@@ -102,10 +104,32 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  acquire(&e1000_lock);
+  uint32 idx = regs[E1000_TDT]; // 指向下一个空闲的插槽，获取可以写入的位置
+  struct tx_desc* desc = &tx_ring[idx]; // 获取当前传输缓存buffer描述符指针，包含硬件数据的物理地址、数据包大小和命令、硬件状态等信息
+
+  if((desc->status & E1000_TXD_STAT_DD) == 0){ // E1000没有完成传输请求
+    release(&e1000_lock);
+    return -1;
+  }
+
+  if(tx_mbufs[idx]){ // 判断该idx是否关联了一个mbuf，mbuf用于管理网络数据包的内存：存储和传递网络数据包
+    mbuffree(tx_mbufs[idx]); // 释放之前关联的mbuf，避免内存泄漏
+    tx_mbufs[idx] = 0;
+  }
+
+  desc->addr = (uint64)m->head; // head存放的是要发送的数据包在内存中的物理地址
+  desc->length = m->len; // 数据包长度
+  desc->cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS; // 设置命令标志，EOP表示数据包的结尾，RS表示需要报告发送状态
+  tx_mbufs[idx] = m; // 将mbuf与当前描述符关联，以便在发送完成后释放内存
+
+  regs[E1000_TDT] = (regs[E1000_TDT] + 1) % TX_RING_SIZE; // 更新硬件的发送描述符尾指针，指向下一个可用的描述符位置
+  release(&e1000_lock);
+  return 0;
   return 0;
 }
 
+// 处理从E1000网卡接收到的数据包
 static void
 e1000_recv(void)
 {
@@ -115,6 +139,21 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+// 循环检查接收描述符环中的数据包
+  while(1){
+    uint32 idx = (regs[E1000_RDT] + 1)% RX_RING_SIZE; // 获取下一个接收描述符的索引，接收的数据包存储在该描述符指向的缓冲区中
+    struct rx_desc *desc = &rx_ring[idx]; // 当前接收描述符的指针
+    if((desc->status & E1000_RXD_STAT_DD) == 0){ // 接收描述符已经没有数据包需要处理，退出循环
+      return;
+    }
+
+    rx_mbufs[idx]->len = desc->length; // 设置mbuf的长度为接收到的数据包长度
+    net_rx(rx_mbufs[idx]); // 将接收到的数据包传递给网络栈进行处理
+    rx_mbufs[idx] = mbufalloc(0); // 分配一个新的mbuf用于存储接收的数据包
+    desc->addr = (uint64)rx_mbufs[idx]->head; // 新的mbuf的地址设置为接收描述符的地址
+    desc->status = 0; // 重置描述符状态，准备接收下一个数据包
+    regs[E1000_RDT] = idx; // 将接收描述符环的尾指针设置为当前索引
+  }
 }
 
 void
